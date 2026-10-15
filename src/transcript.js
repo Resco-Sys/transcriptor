@@ -26,12 +26,18 @@ export const ENGINES = {
   macos: {
     command: ["--from", "mlx-whisper", "mlx_whisper"],
     model: "mlx-community/whisper-large-v3-turbo",
+    cacheRepo: "mlx-community/whisper-large-v3-turbo",
+    toolPackage: "mlx-whisper",
+    toolBin: "mlx_whisper",
     supportsContext: true,
     contextFlag: "--condition-on-previous-text",
   },
   windows: {
     command: ["whisper-ctranslate2"],
     model: "large-v3-turbo",
+    cacheRepo: "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+    toolPackage: "whisper-ctranslate2",
+    toolBin: "whisper-ctranslate2",
     supportsContext: true,
     contextFlag: "--condition_on_previous_text",
     args: ["--device", "cpu", "--compute_type", "int8"],
@@ -42,9 +48,9 @@ export function engineFor(os) {
   return ENGINES[os] ?? ENGINES.windows;
 }
 
-export function buildUvxArgs({ os, audioPath, language, format, useContext = true }) {
+export function buildUvArgs({ os, audioPath, language, format, useContext = true }) {
   const engine = engineFor(os);
-  const args = [...engine.command, audioPath, "--model", engine.model];
+  const args = ["tool", "run", ...engine.command, audioPath, "--model", engine.model];
   if (language) args.push("--language", language);
   args.push("-f", format, "-o", parentDirectory(audioPath), "--verbose", "True");
   if (engine.args) args.push(...engine.args);
@@ -71,12 +77,22 @@ export function extractSegmentText(line) {
   return text || null;
 }
 
+export function isPreparationLine(line) {
+  return (
+    /download/i.test(line) ||
+    /\bfetch(?:ing)?\b/i.test(line) ||
+    /installed \d+ packages/i.test(line) ||
+    /cpython-/i.test(line) ||
+    /resolving \d+ packages/i.test(line)
+  );
+}
+
 export function isStatusLine(line) {
   return (
+    isPreparationLine(line) ||
     /^args:/i.test(line) ||
     /detecting language/i.test(line) ||
     /detected language/i.test(line) ||
-    /download/i.test(line) ||
     /transcription results written/i.test(line) ||
     /it\/s\]/.test(line) ||
     /\d+%\|/.test(line) ||

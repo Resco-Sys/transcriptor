@@ -36,6 +36,11 @@ body {
   color: #5e574e;
 }
 
+.status.preparing {
+  color: #8a4b12;
+  font-weight: 650;
+}
+
 .controls {
   display: flex;
   flex-wrap: wrap;
@@ -217,5 +222,9 @@ select:disabled {
   .progress {
     background: #100e0c;
     color: #ebe4d8;
+  }
+
+  .status.preparing {
+    color: #e2b56a;
   }
 }

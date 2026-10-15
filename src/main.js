@@ -1,11 +1,13 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Command } from "@tauri-apps/plugin-shell";
 import {
-  buildUvxArgs,
+  buildUvArgs,
   detectOs,
   engineFor,
   extractSegmentText,
   fileName,
+  isPreparationLine,
   isStatusLine,
   joinLinesIntoParagraphs,
   transcriptionError,
@@ -41,6 +43,8 @@ const resultEl = document.querySelector("#result");
 const statusEl = document.querySelector("#status");
 
 const CONTEXT_KEY = "transcriptor.useContext";
+const FIRST_RUN_MESSAGE =
+  "Preparando por primera vez: descargando componentes y modelo. Puede tardar varios minutos.";
 
 let audioPath = "";
 let running = false;
@@ -65,6 +69,12 @@ function currentOs() {
 
 function setStatus(message) {
   statusEl.textContent = message;
+}
+
+function showPreparing() {
+  statusEl.classList.add("preparing");
+  setStatus(FIRST_RUN_MESSAGE);
+  showPlaceholder(FIRST_RUN_MESSAGE);
 }
 
 function setBusy(busy) {
@@ -117,14 +127,16 @@ pickButton.addEventListener("click", async () => {
 transcribeButton.addEventListener("click", async () => {
   if (!audioPath || running) return;
 
+  const os = currentOs();
+  const active = engineFor(os);
   const language = languageSelect.value;
   const format = formatSelect.value;
-  const args = buildUvxArgs({
-    os: currentOs(),
+  const args = buildUvArgs({
+    os,
     audioPath,
     language,
     format,
-    useContext: engine.supportsContext && contextInput.checked,
+    useContext: active.supportsContext && contextInput.checked,
   });
 
   const segments = [];
@@ -165,6 +177,7 @@ transcribeButton.addEventListener("click", async () => {
       ) {
         errors.push(line);
       }
+      if (isPreparationLine(line)) showFirstRun();
       if (collectProse && !isStatusLine(line) && !isProgressBar(line)) {
         prose.push(line);
       }
@@ -172,36 +185,26 @@ transcribeButton.addEventListener("click", async () => {
   };
 
   let settled = false;
+  let revealed = false;
+  let stopListening = () => {};
+
+  const showFirstRun = () => {
+    if (settled || revealed) return;
+    showPreparing();
+  };
+
   const finish = (status, placeholder) => {
     if (settled) return;
     settled = true;
+    stopListening();
+    statusEl.classList.remove("preparing");
     if (placeholder) showPlaceholder(placeholder);
     setStatus(status);
     setBusy(false);
   };
 
-  progressEl.textContent = "";
-  showPlaceholder("Transcribiendo…");
-  setStatus("Transcribiendo…");
-  setBusy(true);
-  pushLog(
-    `uvx ${args.map((arg) => (/\s/.test(arg) ? `"${arg}"` : arg)).join(" ")}`,
-  );
-
-  const command = Command.create("uvx", args, {
-    env: {
-      PYTHONIOENCODING: "utf-8",
-      PYTHONUTF8: "1",
-    },
-  });
-
-  command.stdout.on("data", (line) => consume(line, true));
-  command.stderr.on("data", (line) => consume(line, false));
-  command.on("error", (error) => {
-    pushLog(errorText(error));
-  });
-
-  command.on("close", (data) => {
+  const reveal = () => {
+    revealed = true;
     const source = segments.length > 0 ? segments : prose;
     const paragraphs = joinLinesIntoParagraphs(source);
     const failure = transcriptionError(errors);
@@ -212,18 +215,49 @@ transcribeButton.addEventListener("click", async () => {
     } else {
       showParagraphs([]);
     }
-    finish(
-      data.code === 0
-        ? "Transcripción lista."
-        : `uvx terminó con código ${data.code ?? "desconocido"}.`,
-    );
-  });
+  };
+
+  progressEl.textContent = "";
+  showPlaceholder("Transcribiendo…");
+  statusEl.classList.remove("preparing");
+  setStatus("Transcribiendo…");
+  setBusy(true);
+  pushLog(
+    `uv ${args.map((arg) => (/\s/.test(arg) ? `"${arg}"` : arg)).join(" ")}`,
+  );
 
   try {
-    await command.spawn();
+    const unlistenOutput = await listen("transcription-output", (event) => {
+      const payload = event.payload ?? {};
+      consume(payload.line ?? "", payload.stream === "stdout");
+    });
+    stopListening = () => {
+      unlistenOutput();
+    };
+    const unlistenExit = await listen("transcription-exit", (event) => {
+      const code = event.payload?.code;
+      reveal();
+      finish(
+        code === 0
+          ? "Transcripción lista."
+          : `uv terminó con código ${code ?? "desconocido"}.`,
+      );
+    });
+    stopListening = () => {
+      unlistenOutput();
+      unlistenExit();
+    };
+
+    const result = await invoke("start_transcription", {
+      args,
+      toolPackage: active.toolPackage,
+      toolBin: active.toolBin,
+      modelRepo: active.cacheRepo,
+    });
+    if (result?.firstRun) showFirstRun();
   } catch (error) {
     pushLog(errorText(error));
-    finish("No se pudo iniciar uvx.", "No se pudo iniciar la transcripción.");
+    finish("No se pudo iniciar uv.", "No se pudo iniciar la transcripción.");
   }
 });
 

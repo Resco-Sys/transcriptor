@@ -6,12 +6,12 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "fetch-binaries": "node scripts/fetch-binaries.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-dialog": "^2",
-    "@tauri-apps/plugin-shell": "^2"
+    "@tauri-apps/plugin-dialog": "^2"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
