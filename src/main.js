@@ -3,6 +3,7 @@ import { Command } from "@tauri-apps/plugin-shell";
 import {
   buildUvxArgs,
   detectOs,
+  engineFor,
   extractSegmentText,
   fileName,
   isStatusLine,
@@ -32,13 +33,27 @@ const transcribeButton = document.querySelector("#transcribe");
 const fileLabel = document.querySelector("#file-label");
 const languageSelect = document.querySelector("#language");
 const formatSelect = document.querySelector("#format");
+const contextOption = document.querySelector("#context-option");
+const contextInput = document.querySelector("#use-context");
 const controls = document.querySelector("#controls");
 const progressEl = document.querySelector("#progress");
 const resultEl = document.querySelector("#result");
 const statusEl = document.querySelector("#status");
 
+const CONTEXT_KEY = "transcriptor.useContext";
+
 let audioPath = "";
 let running = false;
+const engine = engineFor(currentOs());
+
+if (engine.supportsContext) {
+  const stored = localStorage.getItem(CONTEXT_KEY);
+  contextInput.checked = stored === null ? true : stored === "true";
+  contextOption.hidden = false;
+  contextInput.addEventListener("change", () => {
+    localStorage.setItem(CONTEXT_KEY, String(contextInput.checked));
+  });
+}
 
 function currentOs() {
   const platform =
@@ -109,6 +124,7 @@ transcribeButton.addEventListener("click", async () => {
     audioPath,
     language,
     format,
+    useContext: engine.supportsContext && contextInput.checked,
   });
 
   const segments = [];

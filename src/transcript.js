@@ -22,16 +22,35 @@ export function detectOs(platform = "") {
   return "other";
 }
 
-export function buildUvxArgs({ os, audioPath, language, format }) {
-  const tool =
-    os === "macos"
-      ? ["--from", "mlx-whisper", "mlx_whisper"]
-      : ["whisper-ctranslate2"];
+export const ENGINES = {
+  macos: {
+    command: ["--from", "mlx-whisper", "mlx_whisper"],
+    model: "mlx-community/whisper-large-v3-turbo",
+    supportsContext: true,
+    contextFlag: "--condition-on-previous-text",
+  },
+  windows: {
+    command: ["whisper-ctranslate2"],
+    model: "large-v3-turbo",
+    supportsContext: true,
+    contextFlag: "--condition_on_previous_text",
+    args: ["--device", "cpu", "--compute_type", "int8"],
+  },
+};
 
-  const args = [...tool, audioPath];
+export function engineFor(os) {
+  return ENGINES[os] ?? ENGINES.windows;
+}
+
+export function buildUvxArgs({ os, audioPath, language, format, useContext = true }) {
+  const engine = engineFor(os);
+  const args = [...engine.command, audioPath, "--model", engine.model];
   if (language) args.push("--language", language);
   args.push("-f", format, "-o", parentDirectory(audioPath), "--verbose", "True");
-  if (os !== "macos") args.push("--device", "cpu", "--compute_type", "int8");
+  if (engine.args) args.push(...engine.args);
+  if (engine.supportsContext) {
+    args.push(engine.contextFlag, useContext ? "True" : "False");
+  }
   return args;
 }
 

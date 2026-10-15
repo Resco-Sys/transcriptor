@@ -54,6 +54,17 @@
         </label>
 
         <button id="transcribe" type="button" disabled>Transcribir</button>
+
+        <div id="context-option" class="context-option" hidden>
+          <label class="check">
+            <input id="use-context" type="checkbox" />
+            Usar contexto entre segmentos
+          </label>
+          <p class="help">
+            Más consistente en nombres y puntuación, pero si falla puede repetir
+            texto. Desactívala si aparecen repeticiones.
+          </p>
+        </div>
       </fieldset>
 
       <section class="panel" aria-labelledby="progress-title">

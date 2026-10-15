@@ -70,6 +70,31 @@ body {
   color: #5e574e;
 }
 
+.context-option {
+  flex: 1 1 100%;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #1c1915;
+}
+
+.check input {
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+}
+
+.help {
+  margin: 4px 0 0 1.6rem;
+  max-width: 40rem;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: #6d665c;
+}
+
 button,
 select {
   border-radius: 8px;
@@ -162,9 +187,14 @@ select:disabled {
   .status,
   .field,
   .file-label,
+  .help,
   .panel h2,
   .result .placeholder {
     color: #c8bfb2;
+  }
+
+  .check {
+    color: #f3efe7;
   }
 
   button,
