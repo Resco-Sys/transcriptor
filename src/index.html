@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="./styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Transcriptor</title>
+  </head>
+
+  <body>
+    <main class="app">
+      <header class="header">
+        <h1>Transcriptor</h1>
+        <p id="status" class="status" role="status">Elige un audio para empezar.</p>
+      </header>
+
+      <fieldset id="controls" class="controls">
+        <div class="file-row">
+          <button id="pick-file" type="button">Elegir archivo</button>
+          <span id="file-label" class="file-label">Ningún archivo seleccionado</span>
+        </div>
+
+        <label class="field">
+          Idioma
+          <select id="language">
+            <option value="es">Español</option>
+            <option value="en">English</option>
+            <option value="pt">Português</option>
+            <option value="fr">Français</option>
+            <option value="de">Deutsch</option>
+            <option value="it">Italiano</option>
+            <option value="ca">Català</option>
+            <option value="gl">Galego</option>
+            <option value="eu">Euskara</option>
+            <option value="nl">Nederlands</option>
+            <option value="pl">Polski</option>
+            <option value="ru">Русский</option>
+            <option value="uk">Українська</option>
+            <option value="ar">العربية</option>
+            <option value="hi">हिन्दी</option>
+            <option value="ja">日本語</option>
+            <option value="ko">한국어</option>
+            <option value="zh">中文</option>
+            <option value="">Detectar</option>
+          </select>
+        </label>
+
+        <label class="field">
+          Formato
+          <select id="format">
+            <option value="txt">TXT</option>
+            <option value="srt">SRT</option>
+          </select>
+        </label>
+
+        <button id="transcribe" type="button" disabled>Transcribir</button>
+      </fieldset>
+
+      <section class="panel" aria-labelledby="progress-title">
+        <h2 id="progress-title">Progreso</h2>
+        <pre id="progress" class="progress" aria-live="polite"></pre>
+      </section>
+
+      <section class="panel" aria-labelledby="result-title">
+        <h2 id="result-title">Texto</h2>
+        <article id="result" class="result">
+          <p class="placeholder">La transcripción aparecerá aquí.</p>
+        </article>
+      </section>
+    </main>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

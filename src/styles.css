@@ -1,0 +1,191 @@
+:root {
+  color-scheme: light dark;
+  font-family: "Segoe UI", Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  color: #1c1915;
+  background: #f3efe7;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 28px 24px 48px;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 1.75rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.status {
+  margin: 6px 0 0;
+  color: #5e574e;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+  margin: 22px 0 8px;
+  padding: 0;
+  border: 0;
+  min-inline-size: 0;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.file-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #3f3a33;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+  color: #5e574e;
+}
+
+button,
+select {
+  border-radius: 8px;
+  border: 1px solid #d5cec3;
+  padding: 0.55em 0.9em;
+  font: inherit;
+  color: inherit;
+  background: #fffdf9;
+}
+
+select {
+  min-width: 9.5rem;
+}
+
+button {
+  cursor: pointer;
+  background: #fffdf9;
+}
+
+#transcribe {
+  background: #1f4d45;
+  color: #f7f4ee;
+  border-color: #1f4d45;
+  font-weight: 600;
+}
+
+button:hover:not(:disabled) {
+  border-color: #1f4d45;
+}
+
+#transcribe:hover:not(:disabled) {
+  background: #173e38;
+}
+
+button:disabled,
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.panel {
+  margin-top: 22px;
+}
+
+.panel h2 {
+  margin: 0 0 8px;
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #6d665c;
+}
+
+.progress {
+  margin: 0;
+  min-height: 8.5rem;
+  max-height: 14rem;
+  overflow: auto;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #221f1b;
+  color: #ebe4d8;
+  font-family: "Cascadia Code", "Segoe UI Mono", Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.result {
+  padding: 4px 2px 0;
+  font-size: 1.05rem;
+  line-height: 1.65;
+}
+
+.result p {
+  margin: 0 0 1rem;
+}
+
+.result .placeholder {
+  color: #6d665c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #f3efe7;
+    background: #171512;
+  }
+
+  .status,
+  .field,
+  .file-label,
+  .panel h2,
+  .result .placeholder {
+    color: #c8bfb2;
+  }
+
+  button,
+  select {
+    border-color: #3c362f;
+    background: #24211c;
+    color: #f3efe7;
+  }
+
+  #transcribe {
+    background: #2f6f64;
+    border-color: #2f6f64;
+    color: #f7f4ee;
+  }
+
+  #transcribe:hover:not(:disabled) {
+    background: #398578;
+  }
+
+  .progress {
+    background: #100e0c;
+    color: #ebe4d8;
+  }
+}
