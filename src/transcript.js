@@ -102,6 +102,29 @@ export function isStatusLine(line) {
   );
 }
 
+export function outputFilePath(audioPath, extension) {
+  const index = Math.max(audioPath.lastIndexOf("/"), audioPath.lastIndexOf("\\"));
+  const directory = index < 0 ? "" : audioPath.slice(0, index + 1);
+  const base = index < 0 ? audioPath : audioPath.slice(index + 1);
+  const dot = base.lastIndexOf(".");
+  const stem = dot > 0 ? base.slice(0, dot) : base;
+  return `${directory}${stem}.${extension}`;
+}
+
+export function shouldFlattenLines(format, checked) {
+  return format === "txt" && checked;
+}
+
+export function joinLinesAsProse(lines) {
+  const text = lines
+    .map((line) => String(line).replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text ? [text] : [];
+}
+
 export function joinLinesIntoParagraphs(lines) {
   const paragraphs = [];
   let parts = [];

@@ -9,7 +9,10 @@ import {
   fileName,
   isPreparationLine,
   isStatusLine,
+  joinLinesAsProse,
   joinLinesIntoParagraphs,
+  outputFilePath,
+  shouldFlattenLines,
   transcriptionError,
 } from "./transcript.js";
 
@@ -35,6 +38,8 @@ const transcribeButton = document.querySelector("#transcribe");
 const fileLabel = document.querySelector("#file-label");
 const languageSelect = document.querySelector("#language");
 const formatSelect = document.querySelector("#format");
+const flattenOption = document.querySelector("#flatten-option");
+const flattenInput = document.querySelector("#flatten-lines");
 const contextOption = document.querySelector("#context-option");
 const contextInput = document.querySelector("#use-context");
 const controls = document.querySelector("#controls");
@@ -43,6 +48,7 @@ const resultEl = document.querySelector("#result");
 const statusEl = document.querySelector("#status");
 
 const CONTEXT_KEY = "transcriptor.useContext";
+const FLATTEN_KEY = "transcriptor.flattenLines";
 const FIRST_RUN_MESSAGE =
   "Preparando por primera vez: descargando componentes y modelo. Puede tardar varios minutos.";
 
@@ -57,6 +63,20 @@ if (engine.supportsContext) {
   contextInput.addEventListener("change", () => {
     localStorage.setItem(CONTEXT_KEY, String(contextInput.checked));
   });
+}
+
+const storedFlatten = localStorage.getItem(FLATTEN_KEY);
+flattenInput.checked = storedFlatten === null ? true : storedFlatten === "true";
+flattenInput.addEventListener("change", () => {
+  localStorage.setItem(FLATTEN_KEY, String(flattenInput.checked));
+});
+formatSelect.addEventListener("change", syncFlatten);
+syncFlatten();
+
+function syncFlatten() {
+  const unavailable = formatSelect.value !== "txt";
+  flattenInput.disabled = unavailable;
+  flattenOption.classList.toggle("is-disabled", unavailable);
 }
 
 function currentOs() {
@@ -131,6 +151,7 @@ transcribeButton.addEventListener("click", async () => {
   const active = engineFor(os);
   const language = languageSelect.value;
   const format = formatSelect.value;
+  const flatten = shouldFlattenLines(format, flattenInput.checked);
   const args = buildUvArgs({
     os,
     audioPath,
@@ -206,7 +227,9 @@ transcribeButton.addEventListener("click", async () => {
   const reveal = () => {
     revealed = true;
     const source = segments.length > 0 ? segments : prose;
-    const paragraphs = joinLinesIntoParagraphs(source);
+    const paragraphs = flatten
+      ? joinLinesAsProse(source)
+      : joinLinesIntoParagraphs(source);
     const failure = transcriptionError(errors);
     if (paragraphs.length > 0) {
       showParagraphs(paragraphs);
@@ -234,12 +257,25 @@ transcribeButton.addEventListener("click", async () => {
     stopListening = () => {
       unlistenOutput();
     };
-    const unlistenExit = await listen("transcription-exit", (event) => {
+    const unlistenExit = await listen("transcription-exit", async (event) => {
       const code = event.payload?.code;
+      let saved = true;
+      if (code === 0 && flatten) {
+        try {
+          await invoke("flatten_transcript", {
+            path: outputFilePath(audioPath, "txt"),
+          });
+        } catch (error) {
+          saved = false;
+          pushLog(`No se pudo unir el TXT: ${errorText(error)}`);
+        }
+      }
       reveal();
       finish(
         code === 0
-          ? "Transcripción lista."
+          ? saved
+            ? "Transcripción lista."
+            : "Transcripción lista. No se pudo unir el TXT."
           : `uv terminó con código ${code ?? "desconocido"}.`,
       );
     });

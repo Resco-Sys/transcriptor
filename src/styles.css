@@ -75,8 +75,13 @@ body {
   color: #5e574e;
 }
 
-.context-option {
+.context-option,
+.option {
   flex: 1 1 100%;
+}
+
+.option.is-disabled {
+  opacity: 0.55;
 }
 
 .check {

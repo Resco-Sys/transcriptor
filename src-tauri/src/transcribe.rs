@@ -128,6 +128,66 @@ pub fn start_transcription(
     Ok(StartResponse { first_run })
 }
 
+#[tauri::command]
+pub fn flatten_transcript(path: String) -> Result<(), String> {
+    let file = PathBuf::from(&path);
+    let extension = file
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    if !extension.eq_ignore_ascii_case("txt") || path.contains('\0') {
+        return Err("Solo se pueden unir archivos TXT.".into());
+    }
+    if !file.is_file() {
+        return Err(format!("No se encontró el TXT: {path}"));
+    }
+
+    let text = fs::read_to_string(&file)
+        .map_err(|error| format!("No se pudo leer el TXT: {error}"))?;
+    let flat = flatten_line_breaks(&text);
+    fs::write(&file, flat).map_err(|error| format!("No se pudo guardar el TXT: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flatten_line_breaks;
+
+    #[test]
+    fn joins_segment_lines_into_one_paragraph() {
+        let flat = flatten_line_breaks("Una frase larga.\nOtra.\r\n\r\nYa.\n");
+        assert_eq!(flat, "Una frase larga. Otra. Ya.\n");
+    }
+
+    #[test]
+    fn keeps_an_empty_file_empty() {
+        assert_eq!(flatten_line_breaks(" \n\n "), "");
+    }
+}
+
+fn flatten_line_breaks(text: &str) -> String {
+    let mut flat = String::with_capacity(text.len());
+    let mut pending_space = false;
+    let mut started = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if started {
+                pending_space = true;
+            }
+            continue;
+        }
+        if pending_space {
+            flat.push(' ');
+            pending_space = false;
+        }
+        flat.push(ch);
+        started = true;
+    }
+    if started {
+        flat.push('\n');
+    }
+    flat
+}
+
 fn validate_name(name: &str) -> Result<(), String> {
     if name.is_empty()
         || name.contains('/')

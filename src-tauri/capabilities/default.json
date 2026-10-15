@@ -7,6 +7,7 @@
     "core:default",
     "opener:default",
     "dialog:allow-open",
-    "allow-start-transcription"
+    "allow-start-transcription",
+    "allow-flatten-transcript"
   ]
 }
