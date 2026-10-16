@@ -224,14 +224,14 @@ export function tokenStoreHelp(os) {
   if (os === "windows") {
     return "Se guarda en el Administrador de credenciales de Windows. No vuelve a mostrarse.";
   }
-  return "Se guarda en el Llavero de macOS. No vuelve a mostrarse.";
+  return "Se guarda en una carpeta privada de la app en este Mac. No vuelve a mostrarse.";
 }
 
 export function tokenSavedMessage(os) {
   if (os === "windows") {
     return "Token guardado en el Administrador de credenciales. Pulsa Probar para comprobar el acceso.";
   }
-  return "Token guardado en el Llavero. Pulsa Probar para comprobar el acceso.";
+  return "Token guardado en este Mac. Pulsa Probar para comprobar el acceso.";
 }
 
 export function diarizePanel({ os, saved = false, valid = false }) {

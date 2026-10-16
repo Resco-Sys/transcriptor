@@ -24,7 +24,8 @@ test("diarization is available on macOS and Windows", () => {
   assert.equal(diarizePanel({ os: "linux", saved: true, valid: true }).settings, false);
   assert.match(tokenStoreHelp("windows"), /Administrador de credenciales/);
   assert.match(tokenSavedMessage("windows"), /Administrador de credenciales/);
-  assert.match(tokenStoreHelp("macos"), /Llavero/);
+  assert.match(tokenStoreHelp("macos"), /carpeta privada/);
+  assert.match(tokenSavedMessage("macos"), /este Mac/);
 });
 
 test("macOS explains where to add a token", () => {
