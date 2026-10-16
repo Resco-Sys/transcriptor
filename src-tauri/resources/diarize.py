@@ -43,6 +43,9 @@ MAX_CUE_CHARS = 80
 MAX_CUE_SECONDS = 6.0
 # Un desfase pequeño de marcas de tiempo sigue siendo el mismo turno.
 SPEAKER_GAP_SECONDS = 0.4
+# El modelo a veces deja el arranque del siguiente hablante en el turno anterior.
+HANDOFF_WORDS = 8
+HANDOFF_SECONDS = 3.0
 COMPRESSION_RATIO_LIMIT = 2.4
 SAMPLE_RATE = 16000
 WINDOW_PAD = 0.2
@@ -443,7 +446,7 @@ def assign_and_group(words: list[dict], turns: list[tuple]) -> list[dict]:
         current["words"].append(word)
     for group in groups:
         group["text"] = join_words(group["words"])
-    return [group for group in groups if group["text"]]
+    return [group for group in move_boundary_tails(groups) if group["text"]]
 
 
 def speaker_for_word(word: dict, turns: list[tuple]):
@@ -480,6 +483,57 @@ def speaker_for_word(word: dict, turns: list[tuple]):
 
 def overlap(start: float, end: float, turn_start: float, turn_end: float) -> float:
     return max(0.0, min(end, turn_end) - max(start, turn_start))
+
+
+def move_boundary_tails(groups: list[dict]) -> list[dict]:
+    adjusted = [
+        {"speaker": group["speaker"], "words": list(group["words"]), "text": group["text"]}
+        for group in groups
+    ]
+    for index in range(len(adjusted) - 1):
+        current = adjusted[index]
+        nxt = adjusted[index + 1]
+        if current["speaker"] == nxt["speaker"] or not current["words"] or not nxt["words"]:
+            continue
+        if not continues_sentence(nxt["text"]):
+            continue
+        head, tail = incomplete_tail(current["words"])
+        if not tail:
+            continue
+        current["words"] = head
+        nxt["words"] = tail + nxt["words"]
+        current["text"] = join_words(current["words"])
+        nxt["text"] = join_words(nxt["words"])
+    return adjusted
+
+
+def continues_sentence(text: str) -> bool:
+    stripped = text.lstrip(" \"'«“¿¡([{")
+    if not stripped:
+        return False
+    first = stripped[0]
+    return first.isalpha() and first.islower()
+
+
+def word_ends_sentence(word: dict) -> bool:
+    raw = str(word["word"]).rstrip()
+    return bool(raw) and raw[-1] in ".!?…"
+
+
+def incomplete_tail(words: list[dict]) -> tuple[list[dict], list[dict]]:
+    last_end = -1
+    for index, word in enumerate(words):
+        if word_ends_sentence(word):
+            last_end = index
+    if last_end < 0 or last_end >= len(words) - 1:
+        return words, []
+    tail = words[last_end + 1 :]
+    if len(tail) > HANDOFF_WORDS:
+        return words, []
+    span = float(tail[-1]["end"]) - float(tail[0]["start"])
+    if span > HANDOFF_SECONDS:
+        return words, []
+    return words[: last_end + 1], tail
 
 
 def join_words(words: list[dict]) -> str:
@@ -634,6 +688,69 @@ def self_test() -> int:
         "txt labels",
         mixed == "Persona 1: Hola mundo\n\nPersona 2: adiós\n",
     )
+
+    def timed(text: str, start: float) -> dict:
+        return {"word": text, "start": start, "end": start + 0.3}
+
+    leaked = move_boundary_tails(
+        [
+            {
+                "speaker": "Persona 1",
+                "text": "me indican. Bueno, pues quería",
+                "words": [
+                    timed(" me", 0.0),
+                    timed(" indican.", 0.3),
+                    timed(" Bueno,", 1.0),
+                    timed(" pues", 1.3),
+                    timed(" quería", 1.6),
+                ],
+            },
+            {
+                "speaker": "Persona 2",
+                "text": "empezar por ahí",
+                "words": [timed(" empezar", 2.0), timed(" por", 2.3), timed(" ahí", 2.6)],
+            },
+        ]
+    )
+    check("handoff keeps the finished sentence", join_words(leaked[0]["words"]) == "me indican.")
+    check(
+        "handoff moves the next opening",
+        join_words(leaked[1]["words"]) == "Bueno, pues quería empezar por ahí",
+    )
+
+    kept = move_boundary_tails(
+        [
+            {
+                "speaker": "Persona 2",
+                "text": "algo. " + " ".join(f"palabra{i}" for i in range(12)),
+                "words": [timed(" algo.", 0.0)]
+                + [timed(f" palabra{i}", 0.4 + i * 0.2) for i in range(12)],
+            },
+            {
+                "speaker": "Persona 1",
+                "text": "entonces sigo",
+                "words": [timed(" entonces", 4.0), timed(" sigo", 4.3)],
+            },
+        ]
+    )
+    check("long unfinished turn stays", join_words(kept[0]["words"]).startswith("algo. palabra0"))
+    check("next turn is unchanged", join_words(kept[1]["words"]) == "entonces sigo")
+
+    capital = move_boundary_tails(
+        [
+            {
+                "speaker": "Persona 1",
+                "text": "listo. Bueno",
+                "words": [timed(" listo.", 0.0), timed(" Bueno", 0.4)],
+            },
+            {
+                "speaker": "Persona 2",
+                "text": "Empezar ahora",
+                "words": [timed(" Empezar", 0.8), timed(" ahora", 1.1)],
+            },
+        ]
+    )
+    check("capital starts a new turn", join_words(capital[0]["words"]) == "listo. Bueno")
 
     class Segment:
         def __init__(self, start: float, end: float) -> None:
