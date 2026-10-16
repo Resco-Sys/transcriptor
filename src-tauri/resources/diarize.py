@@ -41,6 +41,18 @@ FASTER_WHISPER_MODEL = "large-v3-turbo"
 MODEL_URL = "https://huggingface.co/pyannote/speaker-diarization-community-1"
 MAX_CUE_CHARS = 80
 MAX_CUE_SECONDS = 6.0
+# Whisper rellena el silencio con frases cortas, sobre todo «Gracias.» en español.
+# Dos segundos es el umbral que usa el propio modelo para cortar ese tramo.
+HALLUCINATION_SILENCE_SECONDS = 2.0
+# Una frase corta repetida tantas veces seguidas no es diálogo: es el bucle.
+LOOP_REPEATS = 4
+SHORT_PHRASE_CHARS = 48
+SHORT_PHRASE_WORDS = 8
+# Un desfase pequeño de marcas de tiempo sigue siendo el mismo turno.
+SPEAKER_GAP_SECONDS = 0.4
+COMPRESSION_RATIO_LIMIT = 2.4
+NO_SPEECH_LIMIT = 0.6
+LOGPROB_LIMIT = -1.0
 
 
 def main(argv: list[str]) -> int:
@@ -120,6 +132,7 @@ def run(args: argparse.Namespace) -> None:
     )
 
     print("Combinando…", flush=True)
+    words = strip_repetition_loops(words)
     groups = assign_and_group(words, list(iter_speaker_turns(diarization)))
     destination = output_path(args.audio, args.output_dir, args.format)
     body = render_srt(groups) if args.format == "srt" else render_txt(groups)
@@ -215,11 +228,19 @@ def transcribe_mlx(samples, model: str, language: str, use_context: bool) -> lis
         "path_or_hf_repo": model,
         "word_timestamps": True,
         "condition_on_previous_text": use_context,
+        "hallucination_silence_threshold": HALLUCINATION_SILENCE_SECONDS,
         "verbose": False,
     }
     if language:
         options["language"] = language
-    return words_from_result(mlx_whisper.transcribe(samples, **options))
+    try:
+        result = mlx_whisper.transcribe(samples, **options)
+    except TypeError as exc:
+        if "hallucination_silence_threshold" not in str(exc):
+            raise
+        options.pop("hallucination_silence_threshold", None)
+        result = mlx_whisper.transcribe(samples, **options)
+    return words_from_result(result)
 
 
 def transcribe_faster(samples, model: str, language: str, use_context: bool) -> list[dict]:
@@ -233,13 +254,34 @@ def transcribe_faster(samples, model: str, language: str, use_context: bool) -> 
             raise
         device, compute_type = "cpu", "int8"
         whisper = WhisperModel(model, device=device, compute_type=compute_type)
-    segments, _info = whisper.transcribe(
-        samples,
-        language=language or None,
-        word_timestamps=True,
-        condition_on_previous_text=use_context,
-    )
-    return words_from_faster_segments(segments)
+
+    def decode(use_vad: bool) -> list[dict]:
+        options = {
+            "language": language or None,
+            "word_timestamps": True,
+            "condition_on_previous_text": use_context,
+            "hallucination_silence_threshold": HALLUCINATION_SILENCE_SECONDS,
+            "vad_filter": use_vad,
+        }
+        if use_vad:
+            # Corta pausas en las que el modelo, si sigue el texto anterior,
+            # se queda repitiendo la misma frase.
+            options["vad_parameters"] = {"min_silence_duration_ms": 500}
+        try:
+            segments, _info = whisper.transcribe(samples, **options)
+        except TypeError as exc:
+            if "hallucination_silence_threshold" not in str(exc):
+                raise
+            options.pop("hallucination_silence_threshold", None)
+            segments, _info = whisper.transcribe(samples, **options)
+        return words_from_faster_segments(segments)
+
+    try:
+        return decode(True)
+    except Exception as exc:
+        if not is_vad_error(exc):
+            raise
+        return decode(False)
 
 
 def faster_cuda_available() -> bool:
@@ -251,9 +293,33 @@ def faster_cuda_available() -> bool:
         return False
 
 
+def is_vad_error(exc: BaseException) -> bool:
+    message = str(exc).casefold()
+    return "vad" in message or "silero" in message or "onnx" in message
+
+
+def segment_attr(segment, name: str):
+    if isinstance(segment, dict):
+        return segment.get(name)
+    return getattr(segment, name, None)
+
+
+def segment_is_unreliable(segment) -> bool:
+    ratio = segment_attr(segment, "compression_ratio")
+    if ratio is not None and float(ratio) > COMPRESSION_RATIO_LIMIT:
+        return True
+    no_speech = segment_attr(segment, "no_speech_prob")
+    logprob = segment_attr(segment, "avg_logprob")
+    if no_speech is None or logprob is None:
+        return False
+    return float(no_speech) > NO_SPEECH_LIMIT and float(logprob) < LOGPROB_LIMIT
+
+
 def words_from_faster_segments(segments) -> list[dict]:
     words = []
     for segment in segments:
+        if segment_is_unreliable(segment):
+            continue
         segment_words = getattr(segment, "words", None) or []
         if segment_words:
             for word in segment_words:
@@ -284,6 +350,8 @@ def words_from_faster_segments(segments) -> list[dict]:
 def words_from_result(result: dict) -> list[dict]:
     words = []
     for segment in result.get("segments") or []:
+        if segment_is_unreliable(segment):
+            continue
         segment_words = segment.get("words") or []
         if segment_words:
             for word in segment_words:
@@ -325,7 +393,12 @@ def assign_and_group(words: list[dict], turns: list[tuple]) -> list[dict]:
     labels = {}
     current = None
     for word in words:
-        raw = speaker_for_word(word, ordered) or "SPEAKER_00"
+        if ordered:
+            raw = speaker_for_word(word, ordered)
+            if raw is None:
+                continue
+        else:
+            raw = "SPEAKER_00"
         if raw not in labels:
             labels[raw] = f"Persona {len(labels) + 1}"
         speaker = labels[raw]
@@ -364,7 +437,113 @@ def speaker_for_word(word: dict, turns: list[tuple]):
             return midpoint - turn_end
         return 0.0
 
-    return min(turns, key=distance)[2]
+    nearest = min(turns, key=distance)
+    if distance(nearest) <= SPEAKER_GAP_SECONDS:
+        return nearest[2]
+    return None
+
+
+def normalize_phrase(text: str) -> str:
+    cleaned = []
+    for ch in text.casefold():
+        cleaned.append(ch if ch.isalnum() or ch.isspace() else " ")
+    return " ".join("".join(cleaned).split())
+
+
+def is_short_phrase(phrase: str) -> bool:
+    if not phrase or len(phrase) > SHORT_PHRASE_CHARS:
+        return False
+    return len(phrase.split()) <= SHORT_PHRASE_WORDS
+
+
+def phrase_repetition(text: str):
+    parts = []
+    current = []
+    for ch in text:
+        if ch in ".!?…":
+            part = normalize_phrase("".join(current))
+            if part:
+                parts.append(part)
+            current = []
+            continue
+        current.append(ch)
+    tail = normalize_phrase("".join(current))
+    if tail:
+        parts.append(tail)
+    if not parts or len(set(parts)) != 1 or not is_short_phrase(parts[0]):
+        return None
+    return parts[0], len(parts)
+
+
+def token_repetition(words: list[dict]):
+    tokens = []
+    for word in words:
+        token = normalize_phrase(str(word["word"]))
+        if token:
+            tokens.append(token)
+    if not tokens or len(set(tokens)) != 1 or not is_short_phrase(tokens[0]):
+        return None
+    return tokens[0], len(tokens)
+
+
+def split_phrase_groups(words: list[dict]) -> list[list[dict]]:
+    groups = []
+    bucket = []
+    for word in words:
+        if bucket:
+            raw = "".join(str(item["word"]) for item in bucket).rstrip()
+            incoming = normalize_phrase(str(word["word"]))
+            repeated = token_repetition(bucket)
+            sentence_ended = bool(raw) and raw[-1] in ".!?…"
+            token_changed = bool(repeated and incoming and incoming != repeated[0])
+            if sentence_ended or token_changed:
+                groups.append(bucket)
+                bucket = []
+        bucket.append(word)
+    if bucket:
+        groups.append(bucket)
+    return groups
+
+
+def group_signature(group: list[dict]):
+    text = "".join(str(word["word"]) for word in group)
+    phrase_info = phrase_repetition(text)
+    token_info = token_repetition(group)
+    if token_info and token_info[1] >= 2:
+        return token_info
+    if phrase_info and phrase_info[1] >= 2:
+        return phrase_info
+    return phrase_info or token_info
+
+
+def strip_repetition_loops(words: list[dict], min_repeats: int = LOOP_REPEATS) -> list[dict]:
+    groups = split_phrase_groups(words)
+    drop = [False] * len(groups)
+    index = 0
+    while index < len(groups):
+        signature = group_signature(groups[index])
+        if signature is None:
+            index += 1
+            continue
+        phrase, count = signature
+        end = index + 1
+        total = count
+        while end < len(groups):
+            other = group_signature(groups[end])
+            if other is None or other[0] != phrase:
+                break
+            total += other[1]
+            end += 1
+        if total >= min_repeats:
+            for cursor in range(index, end):
+                drop[cursor] = True
+        index = end
+
+    kept = []
+    for group, removed in zip(groups, drop):
+        if not removed:
+            kept.extend(group)
+    return kept
 
 
 def overlap(start: float, end: float, turn_start: float, turn_end: float) -> float:
@@ -482,7 +661,23 @@ def self_test() -> int:
         {"word": " z", "start": 5.0, "end": 5.2},
         [(0.0, 1.0, "A"), (10.0, 11.0, "B")],
     )
-    check("gap uses nearest speaker", nearest == "A")
+    check("far gap is dropped", nearest is None)
+    close = speaker_for_word(
+        {"word": " z", "start": 1.1, "end": 1.3},
+        [(0.0, 1.0, "A"), (10.0, 11.0, "B")],
+    )
+    check("near gap keeps speaker", close == "A")
+    skipped = assign_and_group(
+        [
+            {"word": " Hola", "start": 0.1, "end": 0.4},
+            {"word": " Gracias.", "start": 5.0, "end": 5.2},
+        ],
+        [(0.0, 1.0, "A")],
+    )
+    check(
+        "silence is not attached",
+        len(skipped) == 1 and skipped[0]["text"] == "Hola",
+    )
 
     mostly_second = speaker_for_word(
         {"word": " x", "start": 1.8, "end": 2.6},
@@ -589,6 +784,56 @@ def self_test() -> int:
             {"word": " sin marcas", "start": 1.0, "end": 2.0},
         ],
     )
+
+    class ScoredSegment:
+        def __init__(self, text, start, end, words, compression_ratio, no_speech_prob, avg_logprob):
+            self.text = text
+            self.start = start
+            self.end = end
+            self.words = words
+            self.compression_ratio = compression_ratio
+            self.no_speech_prob = no_speech_prob
+            self.avg_logprob = avg_logprob
+
+    filtered = words_from_faster_segments(
+        [
+            ScoredSegment("hola", 0.0, 1.0, [Word(" hola", 0.1, 0.4)], 1.1, 0.1, -0.2),
+            ScoredSegment(
+                "Gracias. Gracias. Gracias. Gracias.",
+                1.0,
+                4.0,
+                [Word(" Gracias.", 1.0, 1.2)],
+                3.6,
+                0.1,
+                -0.2,
+            ),
+            ScoredSegment("ruido", 4.0, 5.0, [Word(" ruido", 4.1, 4.4)], 1.2, 0.9, -1.4),
+        ]
+    )
+    check("unreliable segments dropped", filtered == [{"word": " hola", "start": 0.1, "end": 0.4}])
+
+    loop = [{"word": " Gracias.", "start": index, "end": index + 0.2} for index in range(6)]
+    kept_speech = strip_repetition_loops(
+        loop
+        + [
+            {"word": " Buenos", "start": 6.0, "end": 6.2},
+            {"word": " días.", "start": 6.2, "end": 6.5},
+        ]
+        + [{"word": " Gracias.", "start": 7 + index, "end": 7.2 + index} for index in range(6)]
+    )
+    check("gracias loop dropped", join_words(kept_speech) == "Buenos días.")
+    short_thanks = strip_repetition_loops(
+        [
+            {"word": " Gracias.", "start": 0.0, "end": 0.3},
+            {"word": " Gracias.", "start": 0.4, "end": 0.7},
+        ]
+    )
+    check("two thanks stay", join_words(short_thanks) == "Gracias. Gracias.")
+    bare = strip_repetition_loops(
+        [{"word": " Gracias", "start": index, "end": index + 0.2} for index in range(5)]
+        + [{"word": " vale.", "start": 6.0, "end": 6.3}]
+    )
+    check("bare gracias loop dropped", join_words(bare) == "vale.")
 
     if failures:
         print("Error: " + ", ".join(failures), file=sys.stderr)
