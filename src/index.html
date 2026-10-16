@@ -60,8 +60,32 @@
             <input id="flatten-lines" type="checkbox" checked />
             Reemplazar saltos de línea por espacios
           </label>
-          <p class="help">
+          <p id="flatten-help" class="help">
             El TXT se guarda y se muestra como un solo párrafo. Con SRT no se aplica.
+          </p>
+        </div>
+
+        <div id="diarize-option" class="option" hidden>
+          <div id="diarize-check" hidden>
+            <label class="check">
+              <input id="diarize" type="checkbox" />
+              Distinguir hablantes
+            </label>
+            <p class="help">
+              Separa el texto por persona. Después puedes renombrarlas.
+            </p>
+            <label id="speakers-field" class="field speakers-field" hidden>
+              Número de personas
+              <select id="num-speakers">
+                <option value="">Automático</option>
+                <option value="2" selected>2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+              </select>
+            </label>
+          </div>
+          <p id="diarize-hint" class="help">
+            Para distinguir hablantes, agrega un token en Configuración.
           </p>
         </div>
 
@@ -77,6 +101,30 @@
         </div>
       </fieldset>
 
+      <section id="settings" class="panel" aria-labelledby="settings-title" hidden>
+        <h2 id="settings-title">Configuración</h2>
+        <div class="settings-row">
+          <label class="field settings-token">
+            Token de Hugging Face
+            <input
+              id="hf-token"
+              type="password"
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
+            />
+          </label>
+          <div class="settings-actions">
+            <button id="save-token" type="button">Guardar</button>
+            <button id="test-token" type="button">Probar</button>
+          </div>
+        </div>
+        <p id="token-store-help" class="help">
+          Se guarda en el Llavero de macOS. No vuelve a mostrarse.
+        </p>
+        <p id="token-message" class="help token-message" role="status"></p>
+      </section>
+
       <section class="panel" aria-labelledby="progress-title">
         <h2 id="progress-title">Progreso</h2>
         <pre id="progress" class="progress" aria-live="polite"></pre>
@@ -84,6 +132,7 @@
 
       <section class="panel" aria-labelledby="result-title">
         <h2 id="result-title">Texto</h2>
+        <div id="speaker-names" class="speaker-names" hidden></div>
         <article id="result" class="result">
           <p class="placeholder">La transcripción aparecerá aquí.</p>
         </article>

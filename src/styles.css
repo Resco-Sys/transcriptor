@@ -106,7 +106,8 @@ body {
 }
 
 button,
-select {
+select,
+input {
   border-radius: 8px;
   border: 1px solid #d5cec3;
   padding: 0.55em 0.9em;
@@ -140,9 +141,65 @@ button:hover:not(:disabled) {
 }
 
 button:disabled,
-select:disabled {
+select:disabled,
+input:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.settings-row,
+.settings-actions,
+.speaker-names {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+}
+
+.settings-token {
+  flex: 1 1 16rem;
+}
+
+.settings-token input,
+.speaker-names input {
+  width: 100%;
+  min-width: 9rem;
+}
+
+.settings-actions {
+  gap: 8px;
+}
+
+.speakers-field {
+  margin-top: 10px;
+}
+
+.speaker-names {
+  gap: 12px 16px;
+  margin-bottom: 14px;
+}
+
+.speaker-title,
+.speaker-names .help {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
+.speaker-title {
+  font-size: 0.85rem;
+  color: #5e574e;
+}
+
+.token-message a {
+  color: #1f4d45;
+}
+
+.token-message.is-ok {
+  color: #1f4d45;
+}
+
+.token-message.is-error {
+  color: #8a2a1f;
 }
 
 .panel {
@@ -208,10 +265,24 @@ select:disabled {
   }
 
   button,
-  select {
+  select,
+  input {
     border-color: #3c362f;
     background: #24211c;
     color: #f3efe7;
+  }
+
+  .speaker-title {
+    color: #c8bfb2;
+  }
+
+  .token-message a,
+  .token-message.is-ok {
+    color: #8dcec3;
+  }
+
+  .token-message.is-error {
+    color: #f0a598;
   }
 
   #transcribe {

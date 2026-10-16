@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-apply-speaker-names"
+description = "Enables the apply_speaker_names command without any pre-configured scope."
+commands.allow = ["apply_speaker_names"]
+
+[[permission]]
+identifier = "deny-apply-speaker-names"
+description = "Denies the apply_speaker_names command without any pre-configured scope."
+commands.deny = ["apply_speaker_names"]

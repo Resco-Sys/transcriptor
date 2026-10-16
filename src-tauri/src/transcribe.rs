@@ -6,7 +6,8 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Emitter, Manager};
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
@@ -43,6 +44,7 @@ pub fn start_transcription(
     tool_package: String,
     tool_bin: String,
     model_repo: String,
+    diarize: bool,
 ) -> Result<StartResponse, String> {
     if args.is_empty() {
         return Err("Faltan los argumentos de transcripción.".into());
@@ -52,18 +54,55 @@ pub fn start_transcription(
     if !model_repo.contains('/') || model_repo.contains("..") || model_repo.contains('\\') {
         return Err("Repositorio del modelo no válido.".into());
     }
+    if diarize {
+        if !diarization_supported() {
+            return Err("Distinguir hablantes solo está disponible en macOS y Windows.".into());
+        }
+        if !args.iter().any(|arg| arg == "diarize.py") {
+            return Err("Falta el script de diarización.".into());
+        }
+    }
 
     if RUNNING.swap(true, Ordering::SeqCst) {
         return Err("Ya hay una transcripción en curso.".into());
     }
     let guard = ClearRunning;
 
-    let first_run = needs_first_run(&tool_package, &tool_bin, &model_repo);
+    let hf_token = if diarize {
+        match crate::secrets::require_valid_token() {
+            Ok(token) => Some(token),
+            Err(error) => {
+                drop(guard);
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+
+    let first_run = if diarize {
+        !diarize_dependencies_ready()
+    } else {
+        needs_first_run(&tool_package, &tool_bin, &model_repo)
+    };
     let app_dir = app_binary_dir()?;
     let uv = find_sidecar(&app_dir, "uv")?;
     let ffmpeg = find_sidecar(&app_dir, "ffmpeg")?;
     let ffmpeg_dir = ffmpeg_directory(&app, &ffmpeg)?;
     let path_value = prepend_path(&ffmpeg_dir)?;
+    let args = match prepare_args(&app, args, &ffmpeg, diarize) {
+        Ok(args) => args,
+        Err(error) => {
+            drop(guard);
+            return Err(error);
+        }
+    };
+    if let Some(token) = &hf_token {
+        if token.len() >= 10 && args.iter().any(|arg| arg.contains(token)) {
+            drop(guard);
+            return Err("El token no puede ir en la línea de comandos.".into());
+        }
+    }
 
     let mut command = Command::new(&uv);
     command
@@ -72,9 +111,14 @@ pub fn start_transcription(
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONUTF8", "1")
         .env("PYTHONUNBUFFERED", "1")
+        .env_remove("HUGGING_FACE_HUB_TOKEN")
+        .env_remove("HF_TOKEN")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(token) = &hf_token {
+        command.env("HF_TOKEN", token);
+    }
 
     #[cfg(windows)]
     {
@@ -111,13 +155,19 @@ pub fn start_transcription(
     };
     let output_app = app.clone();
     let exit_app = app.clone();
+    let stdout_token = hf_token.clone();
+    let stderr_token = hf_token;
 
     thread::spawn(move || {
         let _guard = guard;
         let stdout_app = output_app.clone();
         let stderr_app = output_app;
-        let stdout_thread = thread::spawn(move || emit_output(&stdout_app, "stdout", stdout));
-        let stderr_thread = thread::spawn(move || emit_output(&stderr_app, "stderr", stderr));
+        let stdout_thread = thread::spawn(move || {
+            emit_output(&stdout_app, "stdout", stdout, stdout_token.as_deref())
+        });
+        let stderr_thread = thread::spawn(move || {
+            emit_output(&stderr_app, "stderr", stderr, stderr_token.as_deref())
+        });
         let status = child.wait();
         let _ = stdout_thread.join();
         let _ = stderr_thread.join();
@@ -142,15 +192,50 @@ pub fn flatten_transcript(path: String) -> Result<(), String> {
         return Err(format!("No se encontró el TXT: {path}"));
     }
 
-    let text = fs::read_to_string(&file)
-        .map_err(|error| format!("No se pudo leer el TXT: {error}"))?;
+    let text =
+        fs::read_to_string(&file).map_err(|error| format!("No se pudo leer el TXT: {error}"))?;
     let flat = flatten_line_breaks(&text);
     fs::write(&file, flat).map_err(|error| format!("No se pudo guardar el TXT: {error}"))
 }
 
+#[derive(Deserialize)]
+pub struct SpeakerRename {
+    from: String,
+    to: String,
+}
+
+#[tauri::command]
+pub fn apply_speaker_names(path: String, renames: Vec<SpeakerRename>) -> Result<(), String> {
+    let file = PathBuf::from(&path);
+    let extension = file
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    if !(extension.eq_ignore_ascii_case("txt") || extension.eq_ignore_ascii_case("srt"))
+        || path.contains('\0')
+    {
+        return Err("Solo se pueden actualizar archivos TXT o SRT.".into());
+    }
+    if !file.is_file() {
+        return Err(format!("No se encontró el archivo: {path}"));
+    }
+
+    let cleaned = clean_renames(&renames)?;
+    let text = fs::read_to_string(&file)
+        .map_err(|error| format!("No se pudo leer el archivo: {error}"))?;
+    let updated = apply_renames(&text, &cleaned)?;
+    if updated != text {
+        fs::write(&file, updated)
+            .map_err(|error| format!("No se pudo guardar el archivo: {error}"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::flatten_line_breaks;
+    use super::{
+        apply_renames, dist_info_prefix, flatten_line_breaks, is_dist_info_name, mask_secrets,
+    };
 
     #[test]
     fn joins_segment_lines_into_one_paragraph() {
@@ -161,6 +246,62 @@ mod tests {
     #[test]
     fn keeps_an_empty_file_empty() {
         assert_eq!(flatten_line_breaks(" \n\n "), "");
+    }
+
+    #[test]
+    fn masks_tokens_in_logs() {
+        let token = "hf_abcdefghijklmnop";
+        let masked = mask_secrets(
+            &format!("descargando {token} Bearer secretvalue ?token={token}"),
+            Some(token),
+        );
+        assert!(!masked.contains("abcdefghijklmnop"));
+        assert!(!masked.contains("secretvalue"));
+        assert!(masked.contains("hf_***"));
+        assert!(masked.contains("Bearer ***"));
+        assert!(masked.contains("token=***"));
+    }
+
+    #[test]
+    fn renames_speakers_without_touching_longer_labels() {
+        let text = "Persona 1: Hola.\n\nPersona 10: Sigo.\n";
+        let updated = apply_renames(
+            text,
+            &[
+                ("Persona 1".into(), "Ana".into()),
+                ("Persona 10".into(), "Luis".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(updated, "Ana: Hola.\n\nLuis: Sigo.\n");
+    }
+
+    #[test]
+    fn swaps_speaker_names_in_srt() {
+        let text = "1\n00:00:00,000 --> 00:00:01,000\nPersona 1: Hola\n\n2\n00:00:01,000 --> 00:00:02,000\nPersona 2: Qué tal\n";
+        let updated = apply_renames(
+            text,
+            &[
+                ("Persona 1".into(), "Persona 2".into()),
+                ("Persona 2".into(), "Persona 1".into()),
+            ],
+        )
+        .unwrap();
+        assert!(updated.contains("Persona 2: Hola"));
+        assert!(updated.contains("Persona 1: Qué tal"));
+        assert!(!updated.contains("Persona 1: Hola"));
+    }
+
+    #[test]
+    fn dist_info_names_match_the_package_version() {
+        assert_eq!(dist_info_prefix("pyannote.audio"), "pyannote_audio-");
+        assert_eq!(dist_info_prefix("mlx-whisper"), "mlx_whisper-");
+        assert!(is_dist_info_name("torch-2.5.1.dist-info", "torch-"));
+        assert!(!is_dist_info_name("torchaudio-2.5.1.dist-info", "torch-"));
+        assert!(!is_dist_info_name(
+            "torch-geometric-2.0.0.dist-info",
+            "torch-"
+        ));
     }
 }
 
@@ -328,6 +469,84 @@ fn needs_first_run(package: &str, bin: &str, repo: &str) -> bool {
     !model_cached(repo) || !tool_cached(package, bin)
 }
 
+fn diarization_supported() -> bool {
+    cfg!(target_os = "macos") || cfg!(target_os = "windows")
+}
+
+fn diarize_dependencies_ready() -> bool {
+    let whisper_ready = if cfg!(target_os = "windows") {
+        model_cached("mobiuslabsgmbh/faster-whisper-large-v3-turbo")
+            && ["faster-whisper", "ctranslate2"]
+                .into_iter()
+                .all(package_cached)
+    } else {
+        model_cached("mlx-community/whisper-large-v3-turbo") && package_cached("mlx-whisper")
+    };
+    whisper_ready
+        && model_cached("pyannote/speaker-diarization-community-1")
+        && ["torch", "torchaudio", "pyannote.audio"]
+            .into_iter()
+            .all(package_cached)
+}
+
+fn package_cached(package: &str) -> bool {
+    let Some(cache) = uv_cache_dir() else {
+        return false;
+    };
+    let prefix = dist_info_prefix(package);
+    archive_has_dist(&cache.join("archive-v0"), package)
+        || tree_has_dist_info(&cache.join("environments-v2"), &prefix, 8, 20_000)
+}
+
+fn prepare_args(
+    app: &AppHandle,
+    mut args: Vec<String>,
+    ffmpeg: &Path,
+    diarize: bool,
+) -> Result<Vec<String>, String> {
+    if !diarize {
+        return Ok(args);
+    }
+    let index = args
+        .iter()
+        .position(|arg| arg == "diarize.py")
+        .ok_or("Falta el script de diarización.")?;
+    args[index] = diarize_script(app)?.to_string_lossy().into_owned();
+    if !args.iter().any(|arg| arg == "--ffmpeg") {
+        args.push("--ffmpeg".into());
+        args.push(ffmpeg.to_string_lossy().into_owned());
+    }
+    Ok(args)
+}
+
+fn diarize_script(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+    if let Ok(path) = app
+        .path()
+        .resolve("resources/diarize.py", BaseDirectory::Resource)
+    {
+        candidates.push(path);
+    }
+    if let Ok(path) = app.path().resolve("diarize.py", BaseDirectory::Resource) {
+        candidates.push(path);
+    }
+    if let Ok(dir) = app.path().resource_dir() {
+        candidates.push(dir.join("resources").join("diarize.py"));
+        candidates.push(dir.join("diarize.py"));
+    }
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("diarize.py"),
+    );
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            "No se encontró el script de diarización. Vuelve a compilar la aplicación.".into()
+        })
+}
+
 fn model_cached(repo: &str) -> bool {
     let Some(hub) = huggingface_hub_dir() else {
         return false;
@@ -474,7 +693,7 @@ fn contains_large_file(root: &Path, min_bytes: u64, max_depth: u32, max_entries:
 }
 
 fn archive_has_dist(archive: &Path, package: &str) -> bool {
-    let prefix = format!("{}-", package.replace('-', "_"));
+    let prefix = dist_info_prefix(package);
     let Ok(entries) = fs::read_dir(archive) else {
         return false;
     };
@@ -488,7 +707,7 @@ fn archive_has_dist(archive: &Path, package: &str) -> bool {
         for child in children.flatten() {
             let name = child.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with(&prefix) && name.ends_with(".dist-info") {
+            if is_dist_info_name(&name, &prefix) {
                 return true;
             }
         }
@@ -496,7 +715,64 @@ fn archive_has_dist(archive: &Path, package: &str) -> bool {
     false
 }
 
-fn emit_output(app: &AppHandle, stream: &'static str, reader: impl Read) {
+fn dist_info_prefix(package: &str) -> String {
+    let mut normalized = String::new();
+    let mut pending_sep = false;
+    for ch in package.chars() {
+        if ch == '-' || ch == '.' || ch == '_' {
+            pending_sep = !normalized.is_empty();
+            continue;
+        }
+        if pending_sep {
+            normalized.push('_');
+            pending_sep = false;
+        }
+        normalized.push(ch.to_ascii_lowercase());
+    }
+    normalized.push('-');
+    normalized
+}
+
+fn is_dist_info_name(name: &str, prefix: &str) -> bool {
+    let Some(rest) = name.strip_prefix(prefix) else {
+        return false;
+    };
+    let Some(stem) = rest.strip_suffix(".dist-info") else {
+        return false;
+    };
+    stem.starts_with(|ch: char| ch.is_ascii_digit())
+}
+
+fn tree_has_dist_info(root: &Path, prefix: &str, max_depth: u32, max_entries: u32) -> bool {
+    if !root.is_dir() {
+        return false;
+    }
+    let mut stack = vec![(root.to_path_buf(), 0u32)];
+    let mut seen = 0u32;
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > max_entries {
+                return false;
+            }
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if path.is_dir() && is_dist_info_name(&name, prefix) {
+                return true;
+            }
+            if depth < max_depth && path.is_dir() {
+                stack.push((path, depth + 1));
+            }
+        }
+    }
+    false
+}
+
+fn emit_output(app: &AppHandle, stream: &'static str, reader: impl Read, token: Option<&str>) {
     let mut reader = BufReader::new(reader);
     let mut bytes = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -517,7 +793,7 @@ fn emit_output(app: &AppHandle, stream: &'static str, reader: impl Read) {
                 pending.push_str(&String::from_utf8_lossy(&bytes[..valid]));
                 bytes.drain(..valid);
                 for line in take_lines(&mut pending) {
-                    emit_line(app, stream, line);
+                    emit_line(app, stream, line, token);
                 }
             }
             Err(_) => break,
@@ -528,10 +804,10 @@ fn emit_output(app: &AppHandle, stream: &'static str, reader: impl Read) {
         pending.push_str(&String::from_utf8_lossy(&bytes));
     }
     for line in take_lines(&mut pending) {
-        emit_line(app, stream, line);
+        emit_line(app, stream, line, token);
     }
     if !pending.is_empty() {
-        emit_line(app, stream, std::mem::take(&mut pending));
+        emit_line(app, stream, std::mem::take(&mut pending), token);
     }
 }
 
@@ -558,6 +834,172 @@ fn take_lines(pending: &mut String) -> Vec<String> {
     lines
 }
 
-fn emit_line(app: &AppHandle, stream: &'static str, line: String) {
+fn emit_line(app: &AppHandle, stream: &'static str, line: String, token: Option<&str>) {
+    let line = mask_secrets(&line, token);
     let _ = app.emit("transcription-output", OutputEvent { stream, line });
+}
+
+fn mask_secrets(line: &str, token: Option<&str>) -> String {
+    let mut masked = line.to_string();
+    if let Some(token) = token {
+        if token.len() >= 10 {
+            masked = masked.replace(token, "hf_***");
+        }
+    }
+    masked = mask_hf_tokens(&masked);
+    masked = mask_bearer(&masked);
+    mask_query_token(&masked)
+}
+
+fn mask_hf_tokens(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"hf_") {
+            let mut end = index + 3;
+            while end < bytes.len() && bytes[end].is_ascii_alphanumeric() {
+                end += 1;
+            }
+            if end - (index + 3) >= 8 {
+                out.push_str("hf_***");
+                index = end;
+                continue;
+            }
+        }
+        let ch = line[index..].chars().next().unwrap();
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+fn mask_bearer(line: &str) -> String {
+    let lower = line.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut index = 0;
+    let needle = b"bearer ";
+    while index < bytes.len() {
+        if index + needle.len() <= bytes.len() && &bytes[index..index + needle.len()] == needle {
+            out.push_str(&line[index..index + needle.len()]);
+            index += needle.len();
+            let start = index;
+            while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+            if index > start {
+                out.push_str("***");
+            }
+            continue;
+        }
+        let ch = line[index..].chars().next().unwrap();
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+fn mask_query_token(line: &str) -> String {
+    let lower = line.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let preceded = index == 0 || matches!(bytes[index - 1], b'?' | b'&' | b' ' | b'"' | b'\'');
+        if preceded && bytes[index..].starts_with(b"token=") {
+            out.push_str("token=");
+            index += "token=".len();
+            let start = index;
+            while index < bytes.len() && !matches!(bytes[index], b'&' | b' ' | b'\t' | b'"' | b'\'')
+            {
+                index += 1;
+            }
+            if index > start {
+                out.push_str("***");
+            }
+            continue;
+        }
+        let ch = line[index..].chars().next().unwrap();
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+fn clean_renames(renames: &[SpeakerRename]) -> Result<Vec<(String, String)>, String> {
+    if renames.len() > 32 {
+        return Err("Hay demasiados hablantes.".into());
+    }
+    renames
+        .iter()
+        .map(|rename| {
+            let from = rename.from.trim();
+            let to = rename.to.trim();
+            validate_speaker_label(from)?;
+            validate_speaker_label(to)?;
+            Ok((from.to_string(), to.to_string()))
+        })
+        .collect()
+}
+
+fn validate_speaker_label(label: &str) -> Result<(), String> {
+    if label.is_empty() || label.chars().count() > 60 {
+        return Err("El nombre del hablante no es válido.".into());
+    }
+    if label
+        .chars()
+        .any(|ch| ch.is_control() || ch == ':' || ch == '\u{E000}' || ch == '\u{E001}')
+    {
+        return Err(
+            "El nombre del hablante no puede incluir saltos de línea ni dos puntos.".into(),
+        );
+    }
+    Ok(())
+}
+
+fn apply_renames(text: &str, renames: &[(String, String)]) -> Result<String, String> {
+    let mut current = text.to_string();
+    let markers: Vec<String> = (0..renames.len())
+        .map(|index| format!("\u{E000}{index}\u{E001}"))
+        .collect();
+    for (index, (from, to)) in renames.iter().enumerate() {
+        if from == to {
+            continue;
+        }
+        current = replace_line_label(&current, from, &markers[index]);
+    }
+    for (index, (_, to)) in renames.iter().enumerate() {
+        current = current.replace(&format!("{}:", markers[index]), &format!("{to}:"));
+    }
+    Ok(current)
+}
+
+fn replace_line_label(text: &str, label: &str, marker: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let (body, ending) = line_ending(line);
+        if let Some(rest) = body.strip_prefix(label) {
+            if rest.starts_with(':') {
+                out.push_str(marker);
+                out.push_str(rest);
+                out.push_str(ending);
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+fn line_ending(line: &str) -> (&str, &str) {
+    if let Some(body) = line.strip_suffix("\r\n") {
+        (body, "\r\n")
+    } else if let Some(body) = line.strip_suffix('\n') {
+        (body, "\n")
+    } else if let Some(body) = line.strip_suffix('\r') {
+        (body, "\r")
+    } else {
+        (line, "")
+    }
 }

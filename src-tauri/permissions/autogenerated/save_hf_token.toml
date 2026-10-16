@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-hf-token"
+description = "Enables the save_hf_token command without any pre-configured scope."
+commands.allow = ["save_hf_token"]
+
+[[permission]]
+identifier = "deny-save-hf-token"
+description = "Denies the save_hf_token command without any pre-configured scope."
+commands.deny = ["save_hf_token"]

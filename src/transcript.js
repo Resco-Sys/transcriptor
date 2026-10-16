@@ -83,13 +83,36 @@ export function isPreparationLine(line) {
     /\bfetch(?:ing)?\b/i.test(line) ||
     /installed \d+ packages/i.test(line) ||
     /cpython-/i.test(line) ||
-    /resolving \d+ packages/i.test(line)
+    /resolving \d+ packages/i.test(line) ||
+    /resolved \d+ packages/i.test(line)
   );
+}
+
+export const DIARIZE_STAGES = [
+  "Transcribiendo…",
+  "Identificando hablantes…",
+  "Combinando…",
+];
+
+export const DIARIZE_MODEL_URL =
+  "https://huggingface.co/pyannote/speaker-diarization-community-1";
+
+export const DIARIZE_HINT_MISSING =
+  "Para distinguir hablantes, agrega un token en Configuración.";
+
+export const DIARIZE_HINT_UNTESTED =
+  "Prueba el token en Configuración para distinguir hablantes.";
+
+export function isDiarizeStage(line) {
+  return DIARIZE_STAGES.includes(String(line).trim());
 }
 
 export function isStatusLine(line) {
   return (
     isPreparationLine(line) ||
+    isDiarizeStage(line) ||
+    String(line).startsWith("PARAGRAPH\t") ||
+    /^dispositivo:/i.test(line) ||
     /^args:/i.test(line) ||
     /detecting language/i.test(line) ||
     /detected language/i.test(line) ||
@@ -111,8 +134,8 @@ export function outputFilePath(audioPath, extension) {
   return `${directory}${stem}.${extension}`;
 }
 
-export function shouldFlattenLines(format, checked) {
-  return format === "txt" && checked;
+export function shouldFlattenLines(format, checked, diarize = false) {
+  return format === "txt" && checked && !diarize;
 }
 
 export function joinLinesAsProse(lines) {
@@ -153,4 +176,138 @@ export function joinLinesIntoParagraphs(lines) {
 
   flush();
   return paragraphs;
+}
+
+export function buildDiarizeArgs({
+  os = "macos",
+  audioPath,
+  language,
+  format,
+  useContext = true,
+  numSpeakers = "",
+}) {
+  const args = [
+    "run",
+    "--no-project",
+    "diarize.py",
+    "--audio",
+    audioPath,
+    "--model",
+    diarizeModel(os),
+    "--format",
+    format,
+    "--output-dir",
+    parentDirectory(audioPath),
+    "--condition-on-previous-text",
+    useContext ? "true" : "false",
+  ];
+  if (language) args.push("--language", language);
+  const count = speakerCount(numSpeakers);
+  if (count) args.push("--num-speakers", count);
+  return args;
+}
+
+export function speakerCount(value) {
+  const count = String(value);
+  return count === "2" || count === "3" || count === "4" ? count : "";
+}
+
+export function diarizeSupported(os) {
+  return os === "macos" || os === "windows";
+}
+
+export function diarizeModel(os) {
+  return os === "windows" ? ENGINES.windows.model : ENGINES.macos.model;
+}
+
+export function tokenStoreHelp(os) {
+  if (os === "windows") {
+    return "Se guarda en el Administrador de credenciales de Windows. No vuelve a mostrarse.";
+  }
+  return "Se guarda en el Llavero de macOS. No vuelve a mostrarse.";
+}
+
+export function tokenSavedMessage(os) {
+  if (os === "windows") {
+    return "Token guardado en el Administrador de credenciales. Pulsa Probar para comprobar el acceso.";
+  }
+  return "Token guardado en el Llavero. Pulsa Probar para comprobar el acceso.";
+}
+
+export function diarizePanel({ os, saved = false, valid = false }) {
+  if (!diarizeSupported(os)) {
+    return { settings: false, option: false, checkbox: false, hint: "" };
+  }
+  if (saved && valid) {
+    return { settings: true, option: true, checkbox: true, hint: "" };
+  }
+  return {
+    settings: true,
+    option: true,
+    checkbox: false,
+    hint: saved ? DIARIZE_HINT_UNTESTED : DIARIZE_HINT_MISSING,
+  };
+}
+
+export function tokenTestMessage(code) {
+  switch (code) {
+    case "ok":
+      return {
+        tone: "ok",
+        text: "El token es válido y tiene acceso al modelo.",
+        link: false,
+      };
+    case "missing":
+      return {
+        tone: "error",
+        text: "No hay un token guardado. Escríbelo y pulsa Guardar.",
+        link: false,
+      };
+    case "invalid":
+      return { tone: "error", text: "El token no es válido.", link: false };
+    case "gated":
+      return {
+        tone: "error",
+        text: "El token es válido, pero falta aceptar las condiciones del modelo.",
+        link: true,
+      };
+    case "unsaved":
+      return {
+        tone: "error",
+        text: "Pulsa Guardar antes de probar el token.",
+        link: false,
+      };
+    default:
+      return {
+        tone: "error",
+        text: "No se pudo contactar con Hugging Face. Revisa la conexión.",
+        link: false,
+      };
+  }
+}
+
+export function maskSecrets(line) {
+  return String(line)
+    .replace(/hf_[A-Za-z0-9]{8,}/g, "hf_***")
+    .replace(/(authorization:\s*bearer\s+)\S+/gi, "$1***")
+    .replace(/([?&]token=)[^&\s]+/gi, "$1***");
+}
+
+export function parseSpeakerLine(line) {
+  const match = /^(Persona \d+):\s*(.*)$/.exec(String(line).trim());
+  if (!match) return null;
+  return { speaker: match[1], text: match[2] };
+}
+
+export function liveSpeakerName(value) {
+  return String(value).replace(/[\r\n:]/g, "").slice(0, 60);
+}
+
+export function sanitizeSpeakerName(value, fallback) {
+  const clean = String(value)
+    .replace(/[\r\n:]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 60);
+  return clean || fallback;
 }

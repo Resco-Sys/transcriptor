@@ -8,6 +8,10 @@
     "opener:default",
     "dialog:allow-open",
     "allow-start-transcription",
-    "allow-flatten-transcript"
+    "allow-flatten-transcript",
+    "allow-apply-speaker-names",
+    "allow-save-hf-token",
+    "allow-hf-token-status",
+    "allow-test-hf-token"
   ]
 }

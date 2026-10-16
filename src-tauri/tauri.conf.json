@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.ivan.transcriptor",
   "build": {
-    "beforeDevCommand": "npm run fetch-binaries && npm run dev",
+    "beforeDevCommand": "pnpm fetch-binaries && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run fetch-binaries && npm run build",
+    "beforeBuildCommand": "pnpm fetch-binaries && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -28,6 +28,7 @@
     "active": true,
     "targets": "all",
     "externalBin": ["binaries/uv", "binaries/ffmpeg"],
+    "resources": ["resources/diarize.py"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
