@@ -236,6 +236,18 @@ mod tests {
         assert!(normalize_token("hf_abc defghij").is_err());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_credential_manager_keeps_the_token() {
+        let entry =
+            keyring::Entry::new("com.ivan.transcriptor.test", "probe").expect("credential entry");
+        let _ = entry.delete_credential();
+        entry.set_password("hf_roundtrip").expect("set password");
+        let stored = entry.get_password().expect("get password");
+        let _ = entry.delete_credential();
+        assert_eq!(stored, "hf_roundtrip");
+    }
+
     #[test]
     fn maps_hugging_face_responses() {
         assert_eq!(interpret(Http::Status(200), Http::Status(200)), "ok");

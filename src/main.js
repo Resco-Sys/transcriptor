@@ -242,12 +242,12 @@ async function saveToken() {
   try {
     await invoke("save_hf_token", { token });
     tokenInput.value = "";
-    applyTokenStatus({ saved: true, valid: false });
     setTokenMessage({
       tone: "ok",
       text: tokenSavedMessage(currentOs()),
       link: false,
     });
+    await refreshTokenStatus();
   } catch (error) {
     const safe = errorText(error).split(token).join("hf_***");
     setTokenMessage({ tone: "error", text: maskSecrets(safe), link: false });
