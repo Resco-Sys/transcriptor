@@ -41,13 +41,6 @@ FASTER_WHISPER_MODEL = "large-v3-turbo"
 MODEL_URL = "https://huggingface.co/pyannote/speaker-diarization-community-1"
 MAX_CUE_CHARS = 80
 MAX_CUE_SECONDS = 6.0
-# Whisper rellena el silencio con frases cortas, sobre todo «Gracias.» en español.
-# Dos segundos es el umbral que usa el propio modelo para cortar ese tramo.
-HALLUCINATION_SILENCE_SECONDS = 2.0
-# Una frase corta repetida tantas veces seguidas no es diálogo: es el bucle.
-LOOP_REPEATS = 4
-SHORT_PHRASE_CHARS = 48
-SHORT_PHRASE_WORDS = 8
 # Un desfase pequeño de marcas de tiempo sigue siendo el mismo turno.
 SPEAKER_GAP_SECONDS = 0.4
 COMPRESSION_RATIO_LIMIT = 2.4
@@ -132,7 +125,6 @@ def run(args: argparse.Namespace) -> None:
     )
 
     print("Combinando…", flush=True)
-    words = strip_repetition_loops(words)
     groups = assign_and_group(words, list(iter_speaker_turns(diarization)))
     destination = output_path(args.audio, args.output_dir, args.format)
     body = render_srt(groups) if args.format == "srt" else render_txt(groups)
@@ -212,38 +204,31 @@ def choose_whisper_compute(cuda: bool) -> tuple[str, str]:
 
 
 def transcribe(samples, model: str, language: str, use_context: bool) -> list[dict]:
+    # El texto anterior se ignora. Si el modelo falla con «Gracias.» o «¿Qué?»,
+    # reutilizarlo sustituye el resto del audio por esa frase.
+    del use_context
     if sys.platform == "darwin":
-        return transcribe_mlx(samples, model or WHISPER_MODEL, language, use_context)
+        return transcribe_mlx(samples, model or WHISPER_MODEL, language)
     if sys.platform == "win32":
-        return transcribe_faster(
-            samples, model or FASTER_WHISPER_MODEL, language, use_context
-        )
+        return transcribe_faster(samples, model or FASTER_WHISPER_MODEL, language)
     raise RuntimeError("Distinguir hablantes solo está disponible en macOS y Windows.")
 
 
-def transcribe_mlx(samples, model: str, language: str, use_context: bool) -> list[dict]:
+def transcribe_mlx(samples, model: str, language: str) -> list[dict]:
     import mlx_whisper
 
     options = {
         "path_or_hf_repo": model,
         "word_timestamps": True,
-        "condition_on_previous_text": use_context,
-        "hallucination_silence_threshold": HALLUCINATION_SILENCE_SECONDS,
+        "condition_on_previous_text": False,
         "verbose": False,
     }
     if language:
         options["language"] = language
-    try:
-        result = mlx_whisper.transcribe(samples, **options)
-    except TypeError as exc:
-        if "hallucination_silence_threshold" not in str(exc):
-            raise
-        options.pop("hallucination_silence_threshold", None)
-        result = mlx_whisper.transcribe(samples, **options)
-    return words_from_result(result)
+    return words_from_result(mlx_whisper.transcribe(samples, **options))
 
 
-def transcribe_faster(samples, model: str, language: str, use_context: bool) -> list[dict]:
+def transcribe_faster(samples, model: str, language: str) -> list[dict]:
     from faster_whisper import WhisperModel
 
     device, compute_type = choose_whisper_compute(faster_cuda_available())
@@ -259,21 +244,12 @@ def transcribe_faster(samples, model: str, language: str, use_context: bool) -> 
         options = {
             "language": language or None,
             "word_timestamps": True,
-            "condition_on_previous_text": use_context,
-            "hallucination_silence_threshold": HALLUCINATION_SILENCE_SECONDS,
+            "condition_on_previous_text": False,
             "vad_filter": use_vad,
         }
         if use_vad:
-            # Corta pausas en las que el modelo, si sigue el texto anterior,
-            # se queda repitiendo la misma frase.
             options["vad_parameters"] = {"min_silence_duration_ms": 500}
-        try:
-            segments, _info = whisper.transcribe(samples, **options)
-        except TypeError as exc:
-            if "hallucination_silence_threshold" not in str(exc):
-                raise
-            options.pop("hallucination_silence_threshold", None)
-            segments, _info = whisper.transcribe(samples, **options)
+        segments, _info = whisper.transcribe(samples, **options)
         return words_from_faster_segments(segments)
 
     try:
@@ -441,109 +417,6 @@ def speaker_for_word(word: dict, turns: list[tuple]):
     if distance(nearest) <= SPEAKER_GAP_SECONDS:
         return nearest[2]
     return None
-
-
-def normalize_phrase(text: str) -> str:
-    cleaned = []
-    for ch in text.casefold():
-        cleaned.append(ch if ch.isalnum() or ch.isspace() else " ")
-    return " ".join("".join(cleaned).split())
-
-
-def is_short_phrase(phrase: str) -> bool:
-    if not phrase or len(phrase) > SHORT_PHRASE_CHARS:
-        return False
-    return len(phrase.split()) <= SHORT_PHRASE_WORDS
-
-
-def phrase_repetition(text: str):
-    parts = []
-    current = []
-    for ch in text:
-        if ch in ".!?…":
-            part = normalize_phrase("".join(current))
-            if part:
-                parts.append(part)
-            current = []
-            continue
-        current.append(ch)
-    tail = normalize_phrase("".join(current))
-    if tail:
-        parts.append(tail)
-    if not parts or len(set(parts)) != 1 or not is_short_phrase(parts[0]):
-        return None
-    return parts[0], len(parts)
-
-
-def token_repetition(words: list[dict]):
-    tokens = []
-    for word in words:
-        token = normalize_phrase(str(word["word"]))
-        if token:
-            tokens.append(token)
-    if not tokens or len(set(tokens)) != 1 or not is_short_phrase(tokens[0]):
-        return None
-    return tokens[0], len(tokens)
-
-
-def split_phrase_groups(words: list[dict]) -> list[list[dict]]:
-    groups = []
-    bucket = []
-    for word in words:
-        if bucket:
-            raw = "".join(str(item["word"]) for item in bucket).rstrip()
-            incoming = normalize_phrase(str(word["word"]))
-            repeated = token_repetition(bucket)
-            sentence_ended = bool(raw) and raw[-1] in ".!?…"
-            token_changed = bool(repeated and incoming and incoming != repeated[0])
-            if sentence_ended or token_changed:
-                groups.append(bucket)
-                bucket = []
-        bucket.append(word)
-    if bucket:
-        groups.append(bucket)
-    return groups
-
-
-def group_signature(group: list[dict]):
-    text = "".join(str(word["word"]) for word in group)
-    phrase_info = phrase_repetition(text)
-    token_info = token_repetition(group)
-    if token_info and token_info[1] >= 2:
-        return token_info
-    if phrase_info and phrase_info[1] >= 2:
-        return phrase_info
-    return phrase_info or token_info
-
-
-def strip_repetition_loops(words: list[dict], min_repeats: int = LOOP_REPEATS) -> list[dict]:
-    groups = split_phrase_groups(words)
-    drop = [False] * len(groups)
-    index = 0
-    while index < len(groups):
-        signature = group_signature(groups[index])
-        if signature is None:
-            index += 1
-            continue
-        phrase, count = signature
-        end = index + 1
-        total = count
-        while end < len(groups):
-            other = group_signature(groups[end])
-            if other is None or other[0] != phrase:
-                break
-            total += other[1]
-            end += 1
-        if total >= min_repeats:
-            for cursor in range(index, end):
-                drop[cursor] = True
-        index = end
-
-    kept = []
-    for group, removed in zip(groups, drop):
-        if not removed:
-            kept.extend(group)
-    return kept
 
 
 def overlap(start: float, end: float, turn_start: float, turn_end: float) -> float:
@@ -811,29 +684,6 @@ def self_test() -> int:
         ]
     )
     check("unreliable segments dropped", filtered == [{"word": " hola", "start": 0.1, "end": 0.4}])
-
-    loop = [{"word": " Gracias.", "start": index, "end": index + 0.2} for index in range(6)]
-    kept_speech = strip_repetition_loops(
-        loop
-        + [
-            {"word": " Buenos", "start": 6.0, "end": 6.2},
-            {"word": " días.", "start": 6.2, "end": 6.5},
-        ]
-        + [{"word": " Gracias.", "start": 7 + index, "end": 7.2 + index} for index in range(6)]
-    )
-    check("gracias loop dropped", join_words(kept_speech) == "Buenos días.")
-    short_thanks = strip_repetition_loops(
-        [
-            {"word": " Gracias.", "start": 0.0, "end": 0.3},
-            {"word": " Gracias.", "start": 0.4, "end": 0.7},
-        ]
-    )
-    check("two thanks stay", join_words(short_thanks) == "Gracias. Gracias.")
-    bare = strip_repetition_loops(
-        [{"word": " Gracias", "start": index, "end": index + 0.2} for index in range(5)]
-        + [{"word": " vale.", "start": 6.0, "end": 6.3}]
-    )
-    check("bare gracias loop dropped", join_words(bare) == "vale.")
 
     if failures:
         print("Error: " + ", ".join(failures), file=sys.stderr)

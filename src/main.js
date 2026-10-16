@@ -50,6 +50,10 @@ const FLATTEN_HELP =
   "El TXT se guarda y se muestra como un solo párrafo. Con SRT no se aplica.";
 const DIARIZE_FLATTEN_HELP =
   "Con hablantes, el texto se guarda en párrafos por persona.";
+const CONTEXT_HELP =
+  "Más consistente en nombres y puntuación, pero si falla puede repetir texto. Desactívala si aparecen repeticiones.";
+const DIARIZE_CONTEXT_HELP =
+  "Al distinguir hablantes no se reutiliza el texto anterior. Si se reutiliza, un fallo repite la misma frase en todo el audio.";
 
 const pickButton = document.querySelector("#pick-file");
 const transcribeButton = document.querySelector("#transcribe");
@@ -61,6 +65,7 @@ const flattenInput = document.querySelector("#flatten-lines");
 const flattenHelp = document.querySelector("#flatten-help");
 const contextOption = document.querySelector("#context-option");
 const contextInput = document.querySelector("#use-context");
+const contextHelp = document.querySelector("#context-help");
 const controls = document.querySelector("#controls");
 const progressEl = document.querySelector("#progress");
 const resultEl = document.querySelector("#result");
@@ -110,6 +115,7 @@ formatSelect.addEventListener("change", syncFlatten);
 diarizeInput.addEventListener("change", () => {
   syncSpeakers();
   syncFlatten();
+  syncContext();
 });
 saveTokenButton.addEventListener("click", () => {
   void saveToken();
@@ -125,6 +131,7 @@ tokenInput.addEventListener("keydown", (event) => {
 });
 syncFlatten();
 syncSpeakers();
+syncContext();
 
 tokenStoreHelpEl.textContent = tokenStoreHelp(currentOs());
 if (diarizeSupported(currentOs())) {
@@ -144,6 +151,13 @@ function syncFlatten() {
 
 function syncSpeakers() {
   speakersField.hidden = !(diarizeInput.checked && !diarizeCheck.hidden);
+}
+
+function syncContext() {
+  const diarize = diarizeInput.checked && !diarizeCheck.hidden;
+  contextInput.disabled = diarize;
+  contextOption.classList.toggle("is-disabled", diarize);
+  contextHelp.textContent = diarize ? DIARIZE_CONTEXT_HELP : CONTEXT_HELP;
 }
 
 function currentOs() {
@@ -213,6 +227,7 @@ function applyTokenStatus(status) {
   if (!panel.checkbox) diarizeInput.checked = false;
   syncSpeakers();
   syncFlatten();
+  syncContext();
 }
 
 async function refreshTokenStatus() {

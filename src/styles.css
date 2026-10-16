@@ -80,7 +80,8 @@ body {
   flex: 1 1 100%;
 }
 
-.option.is-disabled {
+.option.is-disabled,
+.context-option.is-disabled {
   opacity: 0.55;
 }
 
