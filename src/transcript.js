@@ -50,7 +50,7 @@ export function engineFor(os) {
 
 export function buildUvArgs({ os, audioPath, language, format, useContext = true }) {
   const engine = engineFor(os);
-  const args = ["tool", "run", ...engine.command, audioPath, "--model", engine.model];
+  const args = ["tool", "run", "--python", "3.12", ...engine.command, audioPath, "--model", engine.model];
   if (language) args.push("--language", language);
   args.push("-f", format, "-o", parentDirectory(audioPath), "--verbose", "True");
   if (engine.args) args.push(...engine.args);

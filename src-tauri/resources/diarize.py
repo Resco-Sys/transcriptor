@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.11,<3.13"
 # dependencies = [
 #   "mlx-whisper; sys_platform == 'darwin'",
 #   "faster-whisper; sys_platform == 'win32'",

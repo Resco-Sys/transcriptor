@@ -87,6 +87,29 @@ test("diarize command never carries the token", () => {
     format: "txt",
   });
   assert.equal(normal.includes("diarize.py"), false);
+  assert.deepEqual(normal.slice(0, 5), [
+    "tool",
+    "run",
+    "--python",
+    "3.12",
+    "whisper-ctranslate2",
+  ]);
+
+  const macos = buildUvArgs({
+    os: "macos",
+    audioPath: "/tmp/audio.mp3",
+    language: "es",
+    format: "txt",
+  });
+  assert.deepEqual(macos.slice(0, 7), [
+    "tool",
+    "run",
+    "--python",
+    "3.12",
+    "--from",
+    "mlx-whisper",
+    "mlx_whisper",
+  ]);
 });
 
 test("speaker turns stay separate from flattened prose", () => {
