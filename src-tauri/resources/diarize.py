@@ -44,8 +44,12 @@ MAX_CUE_SECONDS = 6.0
 # Un desfase pequeño de marcas de tiempo sigue siendo el mismo turno.
 SPEAKER_GAP_SECONDS = 0.4
 COMPRESSION_RATIO_LIMIT = 2.4
-NO_SPEECH_LIMIT = 0.6
-LOGPROB_LIMIT = -1.0
+SAMPLE_RATE = 16000
+WINDOW_PAD = 0.2
+WINDOW_MERGE_GAP = 0.5
+WINDOW_MAX = 30.0
+# Un recorte más corto suele inventar «gracias» o «¿qué?».
+MIN_WINDOW = 0.8
 
 
 def main(argv: list[str]) -> int:
@@ -82,50 +86,20 @@ def run(args: argparse.Namespace) -> None:
         ffmpeg_dir = str(Path(ffmpeg).resolve().parent)
         os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
 
-    print("Transcribiendo…", flush=True)
     samples = decode_audio(ffmpeg, args.audio)
+    print("Identificando hablantes…", flush=True)
+    turns = identify_speakers(samples, args.num_speakers)
+    print("Transcribiendo…", flush=True)
     words = transcribe(
         samples,
         args.model,
         args.language,
         as_bool(args.condition_on_previous_text),
-    )
-
-    print("Identificando hablantes…", flush=True)
-    import torch
-    from pyannote.audio import Pipeline
-
-    pipeline = Pipeline.from_pretrained(DIARIZE_MODEL)
-    if pipeline is None:
-        raise RuntimeError(
-            "No se pudo cargar el modelo. Acepta las condiciones en " + MODEL_URL
-        )
-    device_name = choose_pyannote_device(
-        sys.platform,
-        mps=backend_available(torch, "mps"),
-        cuda=backend_available(torch, "cuda"),
-    )
-    device = torch.device(device_name)
-    try:
-        pipeline.to(device)
-    except Exception:
-        if device.type == "cpu":
-            raise
-        device = torch.device("cpu")
-        pipeline.to(device)
-    print(f"Dispositivo: {device.type}", flush=True)
-
-    waveform = torch.from_numpy(samples).unsqueeze(0)
-    call_kwargs = {}
-    if args.num_speakers in (2, 3, 4):
-        call_kwargs["num_speakers"] = args.num_speakers
-    diarization = pipeline(
-        {"waveform": waveform, "sample_rate": 16000},
-        **call_kwargs,
+        speech_windows(turns, samples.size / SAMPLE_RATE),
     )
 
     print("Combinando…", flush=True)
-    groups = assign_and_group(words, list(iter_speaker_turns(diarization)))
+    groups = assign_and_group(words, turns)
     destination = output_path(args.audio, args.output_dir, args.format)
     body = render_srt(groups) if args.format == "srt" else render_txt(groups)
     destination.write_text(body, encoding="utf-8")
@@ -203,32 +177,123 @@ def choose_whisper_compute(cuda: bool) -> tuple[str, str]:
     return "cpu", "int8"
 
 
-def transcribe(samples, model: str, language: str, use_context: bool) -> list[dict]:
+def identify_speakers(samples, num_speakers: int) -> list[tuple]:
+    import torch
+    from pyannote.audio import Pipeline
+
+    pipeline = Pipeline.from_pretrained(DIARIZE_MODEL)
+    if pipeline is None:
+        raise RuntimeError(
+            "No se pudo cargar el modelo. Acepta las condiciones en " + MODEL_URL
+        )
+    device_name = choose_pyannote_device(
+        sys.platform,
+        mps=backend_available(torch, "mps"),
+        cuda=backend_available(torch, "cuda"),
+    )
+    device = torch.device(device_name)
+    try:
+        pipeline.to(device)
+    except Exception:
+        if device.type == "cpu":
+            raise
+        device = torch.device("cpu")
+        pipeline.to(device)
+    print(f"Dispositivo: {device.type}", flush=True)
+
+    waveform = torch.from_numpy(samples).unsqueeze(0)
+    call_kwargs = {}
+    if num_speakers in (2, 3, 4):
+        call_kwargs["num_speakers"] = num_speakers
+    diarization = pipeline(
+        {"waveform": waveform, "sample_rate": SAMPLE_RATE},
+        **call_kwargs,
+    )
+    return list(iter_speaker_turns(diarization))
+
+
+def speech_windows(turns: list[tuple], duration: float) -> list[tuple[float, float]]:
+    if duration <= 0:
+        return []
+    spans = []
+    for start, end, _speaker in turns:
+        span_start = max(0.0, float(start) - WINDOW_PAD)
+        span_end = min(duration, float(end) + WINDOW_PAD)
+        if span_end > span_start:
+            spans.append((span_start, span_end))
+    spans.sort()
+    merged = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1] + WINDOW_MERGE_GAP:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    windows = []
+    for start, end in merged:
+        cursor = start
+        while end - cursor > WINDOW_MAX:
+            windows.append((cursor, cursor + WINDOW_MAX))
+            cursor += WINDOW_MAX
+        if end > cursor:
+            windows.append((cursor, end))
+    usable = [window for window in windows if window[1] - window[0] >= MIN_WINDOW]
+    if usable:
+        return usable
+    if windows:
+        return windows
+    return [(0.0, duration)]
+
+
+def slice_audio(samples, start: float, end: float):
+    first = max(0, int(start * SAMPLE_RATE))
+    last = min(samples.size, int(end * SAMPLE_RATE))
+    if last <= first:
+        return samples[:0]
+    return samples[first:last].copy()
+
+
+def shift_words(words: list[dict], offset: float) -> list[dict]:
+    if offset == 0:
+        return words
+    return [
+        {
+            "word": word["word"],
+            "start": float(word["start"]) + offset,
+            "end": float(word["end"]) + offset,
+        }
+        for word in words
+    ]
+
+
+def transcribe(samples, model: str, language: str, use_context: bool, windows: list[tuple]) -> list[dict]:
     # El texto anterior se ignora. Si el modelo falla con «Gracias.» o «¿Qué?»,
     # reutilizarlo sustituye el resto del audio por esa frase.
     del use_context
     if sys.platform == "darwin":
-        return transcribe_mlx(samples, model or WHISPER_MODEL, language)
+        return transcribe_mlx(samples, model or WHISPER_MODEL, language, windows)
     if sys.platform == "win32":
-        return transcribe_faster(samples, model or FASTER_WHISPER_MODEL, language)
+        return transcribe_faster(samples, model or FASTER_WHISPER_MODEL, language, windows)
     raise RuntimeError("Distinguir hablantes solo está disponible en macOS y Windows.")
 
 
-def transcribe_mlx(samples, model: str, language: str) -> list[dict]:
+def transcribe_mlx(samples, model: str, language: str, windows: list[tuple]) -> list[dict]:
     import mlx_whisper
 
-    options = {
-        "path_or_hf_repo": model,
-        "word_timestamps": True,
-        "condition_on_previous_text": False,
-        "verbose": False,
-    }
-    if language:
-        options["language"] = language
-    return words_from_result(mlx_whisper.transcribe(samples, **options))
+    def decode(chunk):
+        options = {
+            "path_or_hf_repo": model,
+            "word_timestamps": True,
+            "condition_on_previous_text": False,
+            "verbose": False,
+        }
+        if language:
+            options["language"] = language
+        return words_from_result(mlx_whisper.transcribe(chunk, **options))
+
+    return transcribe_windows(samples, windows, decode)
 
 
-def transcribe_faster(samples, model: str, language: str) -> list[dict]:
+def transcribe_faster(samples, model: str, language: str, windows: list[tuple]) -> list[dict]:
     from faster_whisper import WhisperModel
 
     device, compute_type = choose_whisper_compute(faster_cuda_available())
@@ -240,24 +305,27 @@ def transcribe_faster(samples, model: str, language: str) -> list[dict]:
         device, compute_type = "cpu", "int8"
         whisper = WhisperModel(model, device=device, compute_type=compute_type)
 
-    def decode(use_vad: bool) -> list[dict]:
-        options = {
-            "language": language or None,
-            "word_timestamps": True,
-            "condition_on_previous_text": False,
-            "vad_filter": use_vad,
-        }
-        if use_vad:
-            options["vad_parameters"] = {"min_silence_duration_ms": 500}
-        segments, _info = whisper.transcribe(samples, **options)
+    def decode(chunk):
+        segments, _info = whisper.transcribe(
+            chunk,
+            language=language or None,
+            word_timestamps=True,
+            condition_on_previous_text=False,
+            vad_filter=False,
+        )
         return words_from_faster_segments(segments)
 
-    try:
-        return decode(True)
-    except Exception as exc:
-        if not is_vad_error(exc):
-            raise
-        return decode(False)
+    return transcribe_windows(samples, windows, decode)
+
+
+def transcribe_windows(samples, windows: list[tuple], decode) -> list[dict]:
+    words = []
+    for start, end in windows:
+        chunk = slice_audio(samples, start, end)
+        if chunk.size == 0:
+            continue
+        words.extend(shift_words(decode(chunk), start))
+    return words
 
 
 def faster_cuda_available() -> bool:
@@ -269,11 +337,6 @@ def faster_cuda_available() -> bool:
         return False
 
 
-def is_vad_error(exc: BaseException) -> bool:
-    message = str(exc).casefold()
-    return "vad" in message or "silero" in message or "onnx" in message
-
-
 def segment_attr(segment, name: str):
     if isinstance(segment, dict):
         return segment.get(name)
@@ -281,14 +344,10 @@ def segment_attr(segment, name: str):
 
 
 def segment_is_unreliable(segment) -> bool:
+    # Solo se descarta un tramo que se repite dentro de sí mismo.
+    # «Gracias.» suena seguro para el modelo; el habla real, no, y no hay que tirarla.
     ratio = segment_attr(segment, "compression_ratio")
-    if ratio is not None and float(ratio) > COMPRESSION_RATIO_LIMIT:
-        return True
-    no_speech = segment_attr(segment, "no_speech_prob")
-    logprob = segment_attr(segment, "avg_logprob")
-    if no_speech is None or logprob is None:
-        return False
-    return float(no_speech) > NO_SPEECH_LIMIT and float(logprob) < LOGPROB_LIMIT
+    return ratio is not None and float(ratio) > COMPRESSION_RATIO_LIMIT
 
 
 def words_from_faster_segments(segments) -> list[dict]:
@@ -683,7 +742,28 @@ def self_test() -> int:
             ScoredSegment("ruido", 4.0, 5.0, [Word(" ruido", 4.1, 4.4)], 1.2, 0.9, -1.4),
         ]
     )
-    check("unreliable segments dropped", filtered == [{"word": " hola", "start": 0.1, "end": 0.4}])
+    check("unreliable segments dropped", filtered == [
+        {"word": " hola", "start": 0.1, "end": 0.4},
+        {"word": " ruido", "start": 4.1, "end": 4.4},
+    ])
+
+    check("no turns uses the file", speech_windows([], 10) == [(0.0, 10.0)])
+    check(
+        "nearby turns merge",
+        speech_windows([(1.0, 2.0, "A"), (2.2, 3.0, "B")], 10) == [(0.8, 3.2)],
+    )
+    check(
+        "distant turns stay apart",
+        speech_windows([(1.0, 3.0, "A"), (8.0, 9.0, "B")], 12) == [(0.8, 3.2), (7.8, 9.2)],
+    )
+    check(
+        "long speech splits",
+        speech_windows([(0.0, 75.0, "A")], 80) == [(0.0, 30.0), (30.0, 60.0), (60.0, 75.2)],
+    )
+    check(
+        "tiny blip is skipped when other speech exists",
+        speech_windows([(1.0, 6.0, "A"), (20.0, 20.2, "B")], 30) == [(0.8, 6.2)],
+    )
 
     if failures:
         print("Error: " + ", ".join(failures), file=sys.stderr)
